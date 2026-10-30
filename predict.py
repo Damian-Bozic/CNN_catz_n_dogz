@@ -34,13 +34,15 @@ def predict_image(image_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CatDogCNN().to(device)
 
-    if not os.path.exists("cat_dog_cnn.pth"):
+    # Wskaż nową ścieżkę w /tmp/
+    model_path = "/tmp/cat_dog_cnn.pth"
+
+    if not os.path.exists(model_path):
         print(
-            "Błąd: Brak pliku wag 'cat_dog_cnn.pth'. Poczekaj na zakończenie treningu!")
+            f"Błąd: Brak pliku wag '{model_path}'. Poczekaj na zakończenie treningu!")
         return
 
-    model.load_state_dict(torch.load("cat_dog_cnn.pth", map_location=device))
-    model.eval()
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     # 5. Predykcja
     with torch.no_grad():

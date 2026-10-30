@@ -60,8 +60,9 @@ def train_model(epochs=5, batch_size=32, lr=0.001):
         print(
             f"Epoka [{epoch + 1}/{epochs}] -> Strata: {epoch_loss:.4f} | Celność Train: {epoch_acc:.2f}% | Celność Test: {test_acc:.2f}%")
 
-    torch.save(model.state_dict(), "cat_dog_cnn.pth")
-    print("Trening zakończony! Model zapisano jako 'cat_dog_cnn.pth'")
+    # Zamiast starej ścieżki wpisz nową lokalizację w /tmp/
+    torch.save(model.state_dict(), "/tmp/cat_dog_cnn.pth")
+    print("Trening zakończony! Model zapisano jako '/tmp/cat_dog_cnn.pth'")
 
 
 if __name__ == "__main__":
