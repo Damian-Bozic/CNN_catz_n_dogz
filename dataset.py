@@ -2,20 +2,27 @@ import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
 from datasets import load_dataset
+from collections.abc import Callable, Sized
+from typing import Any, cast
+from PIL import Image
 
 
-class HuggingFaceCatsDogs(Dataset):
-    def __init__(self, hf_dataset, transform=None):
+class HuggingFaceCatsDogs(Dataset[Any]):
+    def __init__(
+        self,
+        hf_dataset: Any,
+        transform: Callable[[Image.Image], Any] | None = None,
+    ) -> None:
         self.dataset = hf_dataset
         self.transform = transform
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[Any, int]:
         item = self.dataset[idx]
         image = item['image']
-        label = item['labels']
+        label = item["labels"]
 
         # Convert non-RGB images before applying transforms.
         if image.mode != 'RGB':
@@ -27,12 +34,17 @@ class HuggingFaceCatsDogs(Dataset):
         return image, label
 
 
-def get_data_loaders(batch_size=32):
-    print("Ładowanie zbioru microsoft/cats_vs_dogs z Hugging Face...")
-    raw_dataset = load_dataset(
-        "microsoft/cats_vs_dogs",
-        split="train",
-        cache_dir="/tmp/ai-ml-piscine-rush"
+def get_data_loaders(
+    batch_size: int = 32,
+) -> tuple[DataLoader[Any], DataLoader[Any]]:
+    print("Loading the microsoft/cats_vs_dogs dataset from Hugging Face...")
+    raw_dataset = cast(
+        Dataset[Any],
+        load_dataset(
+            "microsoft/cats_vs_dogs",
+            split="train",
+            cache_dir="/tmp/ai-ml-piscine-rush",
+        ),
     )
 
     train_transform = transforms.Compose([
@@ -55,8 +67,9 @@ def get_data_loaders(batch_size=32):
         )
     ])
 
-    train_size = int(0.8 * len(raw_dataset))
-    test_size = len(raw_dataset) - train_size
+    dataset_size = len(cast(Sized, raw_dataset))
+    train_size = int(0.8 * dataset_size)
+    test_size = dataset_size - train_size
     raw_train, raw_test = random_split(
         raw_dataset,
         [train_size, test_size],
@@ -80,8 +93,8 @@ def get_data_loaders(batch_size=32):
     )
 
     print(
-        f"Załadowano! Trening: {len(train_dataset)} zdjęć,",
-        f"Test: {len(test_dataset)} zdjęć."
+        f"Loaded {len(train_dataset)} training images and",
+        f"{len(test_dataset)} test images."
     )
     return train_loader, test_loader
 
@@ -89,4 +102,4 @@ def get_data_loaders(batch_size=32):
 if __name__ == "__main__":
     train_loader, test_loader = get_data_loaders()
     images, labels = next(iter(train_loader))
-    print(f"Kształt paczki danych: {images.shape}")
+    print(f"Batch shape: {images.shape}")

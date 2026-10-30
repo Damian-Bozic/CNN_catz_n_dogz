@@ -7,15 +7,14 @@ from dataset import get_data_loaders
 from model import CatDogCNN
 
 
-
 def train_model(
-    epochs=5,
-    batch_size=32,
-    lr=0.001,
+    epochs: int = 5,
+    batch_size: int = 32,
+    lr: float = 0.001,
     progress_callback: Callable[[int, int], None] | None = None,
-):
+) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Używane urządzenie do treningu: {device}")
+    print(f"Training device: {device}")
 
     train_loader, test_loader = get_data_loaders(batch_size=batch_size)
     model = CatDogCNN().to(device)
@@ -23,7 +22,7 @@ def train_model(
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    print("Rozpoczynam trening sieci CNN...")
+    print("Starting CNN training...")
 
     for epoch in range(epochs):
         model.train()
@@ -45,7 +44,7 @@ def train_model(
             total_train += labels.size(0)
             correct_train += (predicted == labels).sum().item()
 
-        epoch_loss = running_loss / len(train_loader.dataset)
+        epoch_loss = running_loss / total_train
         epoch_acc = (correct_train / total_train) * 100
 
         model.eval()
@@ -63,20 +62,20 @@ def train_model(
         test_acc = (correct_test / total_test) * 100
         print(
 
-            f"Epoka [{epoch + 1}/{epochs}] -> Strata: {epoch_loss:.4f}",
-            f"Celność Train: {epoch_acc:.2f}%",
-            f"Celność Test: {test_acc:.2f}%",
+            f"Epoch [{epoch + 1}/{epochs}] -> Loss: {epoch_loss:.4f}",
+            f"Training accuracy: {epoch_acc:.2f}%",
+            f"Test accuracy: {test_acc:.2f}%",
             sep=" | "
         )
-        
+
         if progress_callback is not None:
             progress_callback(epoch + 1, epochs)
 
-    # Zamiast starej ścieżki wpisz nową lokalizację w /tmp/
     torch.save(model.state_dict(), "/tmp/cat_dog_cnn.pth")
-    with open("/tmp/cat_dog_cnn.metadata.json", "w", encoding="utf-8") as metadata_file:
+    with open("/tmp/cat_dog_cnn.metadata.json",
+              "w", encoding="utf-8") as metadata_file:
         json.dump({"epochs": epochs}, metadata_file)
-    print("Trening zakończony! Model zapisano jako '/tmp/cat_dog_cnn.pth'")
+    print("Training finished. Model saved to '/tmp/cat_dog_cnn.pth'.")
 
 
 if __name__ == "__main__":

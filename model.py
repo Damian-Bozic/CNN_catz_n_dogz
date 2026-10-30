@@ -4,8 +4,8 @@ import torch.nn.functional as F
 
 
 class CatDogCNN(nn.Module):
-    def __init__(self):
-        super(CatDogCNN, self).__init__()
+    def __init__(self) -> None:
+        super().__init__()
 
         # The input has 3 RGB channels and a 64x64 resolution.
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
@@ -28,7 +28,7 @@ class CatDogCNN(nn.Module):
         self.dropout = nn.Dropout(0.5)
         self.fc2 = nn.Linear(256, 2)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(F.relu(self.bn1(self.conv1(x))))
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
@@ -46,4 +46,4 @@ if __name__ == "__main__":
     model = CatDogCNN()
     random_input = torch.randn(1, 3, 64, 64)
     output = model(random_input)
-    print(f"Nowy model działa! Kształt wyjścia: {output.shape}")
+    print(f"Model output shape: {output.shape}")

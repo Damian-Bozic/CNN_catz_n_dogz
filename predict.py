@@ -1,14 +1,22 @@
 import sys
-import os
+from pathlib import Path
+from typing import cast
+
 import torch
 from PIL import Image
+from PIL import UnidentifiedImageError
 from torchvision import transforms
+
 from model import CatDogCNN
 
 
-def predict_image(image_path):
-    if not os.path.exists(image_path):
-        print(f"Błąd: Plik '{image_path}' nie istnieje!")
+MODEL_PATH = Path("/tmp/cat_dog_cnn.pth")
+
+
+def predict_image(image_path: str) -> None:
+    image_file = Path(image_path)
+    if not image_file.is_file():
+        print(f"Error: file '{image_path}' does not exist.")
         return
 
     transform = transforms.Compose([
@@ -21,27 +29,31 @@ def predict_image(image_path):
     ])
 
     try:
-        image = Image.open(image_path).convert('RGB')
-    except Exception as e:
-        print(f"Błąd podczas otwierania pliku: {e}")
+        with Image.open(image_file) as source_image:
+            image = source_image.convert("RGB")
+    except (OSError, UnidentifiedImageError) as error:
+        print(f"Error while opening the file: {error}")
         return
 
-    image_tensor = transform(image).unsqueeze(0)
+    image_tensor = cast(torch.Tensor, transform(image)).unsqueeze(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CatDogCNN().to(device)
+    model.eval()
 
-    # Wskaż nową ścieżkę w /tmp/
-    model_path = "/tmp/cat_dog_cnn.pth"
-
-    if not os.path.exists(model_path):
+    if not MODEL_PATH.is_file():
         print(
-            f"Błąd: Brak pliku wag '{model_path}'.",
-            "Poczekaj na zakończenie treningu!"
+            f"Error: model weights '{MODEL_PATH}' are missing.",
+            "Wait for training to finish."
         )
         return
 
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    state_dict = torch.load(
+        MODEL_PATH,
+        map_location=device,
+        weights_only=True,
+    )
+    model.load_state_dict(state_dict)
 
     with torch.no_grad():
         image_tensor = image_tensor.to(device)
@@ -49,18 +61,18 @@ def predict_image(image_path):
         probabilities = torch.softmax(outputs, dim=1)
         confidence, predicted_idx = torch.max(probabilities, 1)
 
-    classes = ['kot', 'pies']
-    result = classes[predicted_idx.item()]
+    classes = ["cat", "dog"]
+    result = classes[int(predicted_idx.item())]
     percentage = confidence.item() * 100
 
     print(
-        f"\n[WYNIK]: Model uważa na {percentage:.2f}%,",
-        f"że to zdjęcie przedstawia: **{result.upper()}**"
+        f"\n[RESULT]: The model is {percentage:.2f}% confident",
+        f"that this image is a {result.upper()}."
     )
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Użycie: uv run python3 predict.py <sciezka_do_zdjecia.jpg>")
+        print("Usage: uv run python3 predict.py <path_to_image.jpg>")
     else:
         predict_image(sys.argv[1])
