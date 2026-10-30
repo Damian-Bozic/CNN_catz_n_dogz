@@ -2,4 +2,4 @@ __pycache__/
 .mypy_cache/
 cat_dog_cnn.pth
 .idea/
-.venv
+confusion_matrix.png

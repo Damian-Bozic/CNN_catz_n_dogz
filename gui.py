@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 import queue
 import re
 import signal
 import sys
 import tempfile
+import webbrowser
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -19,6 +22,7 @@ from PIL import Image, ImageTk
 
 ROOT = Path(__file__).resolve().parent
 MODEL_PATH = Path("/tmp/cat_dog_cnn.pth")
+MODEL_METADATA_PATH = Path("/tmp/cat_dog_cnn.metadata.json")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 
@@ -79,12 +83,16 @@ class ImageBrowser(ttk.Frame):
         self.paths: list[Path] = []
         self.image_loader: ImageLoader | None = None
         self.labels: list[str] = []
+        self.label_loader: Callable[[int], str] | None = None
         self.image_count = 0
         self.selected_index: int | None = None
-        self.thumbnail_images: dict[int, ImageTk.PhotoImage] = {}
+        self.thumbnail_images: OrderedDict[int, ImageTk.PhotoImage]
+        self.thumbnail_images = OrderedDict()
+        self.thumbnail_errors: dict[int, str] = {}
         self.columns = 1
         self.cell_width = 170
         self.cell_height = 160
+        self._resize_redraw_id: str | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -103,7 +111,7 @@ class ImageBrowser(ttk.Frame):
         )
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=scrollbar.set)
-        self.canvas.bind("<Configure>", self._redraw)
+        self.canvas.bind("<Configure>", self._schedule_resize_redraw)
         self.canvas.bind("<Button-1>", self._select_from_click)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind(
@@ -138,6 +146,7 @@ class ImageBrowser(ttk.Frame):
             path.parent.name if path.parent != folder else "Unlabelled"
             for path in self.paths
         ]
+        self.label_loader = None
         self.image_count = len(self.paths)
         self.image_loader = self._load_local_image
         self._reset_source()
@@ -150,7 +159,8 @@ class ImageBrowser(ttk.Frame):
     ) -> None:
         self.folder = None
         self.paths = []
-        self.labels = [label_loader(index) for index in range(image_count)]
+        self.labels = []
+        self.label_loader = label_loader
         self.image_count = image_count
 
         def load_image(index: int) -> Image.Image:
@@ -163,6 +173,8 @@ class ImageBrowser(ttk.Frame):
     def set_loading(self, message: str) -> None:
         self.image_count = 0
         self.image_loader = None
+        self.thumbnail_images.clear()
+        self.thumbnail_errors.clear()
         self.canvas.delete("all")
         self.info_label.configure(text=message)
         self.predict_button.configure(state="disabled")
@@ -170,6 +182,7 @@ class ImageBrowser(ttk.Frame):
     def _reset_source(self) -> None:
         self.selected_index = 0 if self.image_count else None
         self.thumbnail_images.clear()
+        self.thumbnail_errors.clear()
         self._redraw()
         self._update_info()
 
@@ -181,31 +194,43 @@ class ImageBrowser(ttk.Frame):
         if self.image_count == 0 or self.image_loader is None:
             self.canvas.delete("all")
             return
+
         self.columns = max(1, self.canvas.winfo_width() // self.cell_width)
         rows = (self.image_count + self.columns - 1) // self.columns
-        self.canvas.configure(scrollregion=(
-            0, 0, self.columns * self.cell_width, rows * self.cell_height))
+        self.canvas.configure(scrollregion=(0, 0, self.columns * self.cell_width, rows * self.cell_height))
         first_row = max(0, int(self.canvas.canvasy(0) // self.cell_height))
         last_row = min(rows, first_row +
                        int(self.canvas.winfo_height() // self.cell_height) + 2)
         self.canvas.delete("thumbnail")
         self.thumbnail_images.clear()
-        for index in range(
-            first_row * self.columns,
-            min(last_row * self.columns, self.image_count)
-        ):
+        for index in range(first_row * self.columns, min(last_row * self.columns, self.image_count)):
             self._draw_thumbnail(index)
+        visible_start = first_row * self.columns
+        visible_end = min(last_row * self.columns, self.image_count)
+        for index in list(self.thumbnail_images):
+            if index < visible_start or index >= visible_end:
+                del self.thumbnail_images[index]
+        while len(self.thumbnail_images) > 300:
+            self.thumbnail_images.popitem(last=False)
+
+    def _schedule_resize_redraw(self, _event: tk.Event | None = None) -> None:
+        if self._resize_redraw_id is None:
+            self._resize_redraw_id = self.after_idle(self._redraw_after_resize)
+
+    def _redraw_after_resize(self) -> None:
+        self._resize_redraw_id = None
+        self._redraw()
 
     def _draw_thumbnail(self, index: int) -> None:
         try:
-            image_loader = self.image_loader
-            if image_loader is None:
-                return
-            image = image_loader(index)
-            image.thumbnail((145, 120), getattr(Image, "Resampling").LANCZOS)
+            if image is None:
+                throw ValueError("Image cannot be none")
+            image = self.image_loader(index)
+            image.thumbnail((145, 120), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
             image.close()
         except (OSError, ValueError, KeyError) as error:
+            self.thumbnail_errors[index] = str(error)
             self.canvas.create_text(
                 self._x_for(index) + self.cell_width / 2,
                 self._y_for(index) + 60,
@@ -213,7 +238,6 @@ class ImageBrowser(ttk.Frame):
                 tags=("thumbnail", f"image-{index}"),
             )
             return
-        self.thumbnail_images[index] = photo
         self.canvas.create_image(
             self._x_for(index) + self.cell_width / 2,
             self._y_for(index) + 58,
@@ -246,7 +270,7 @@ class ImageBrowser(ttk.Frame):
     def _name_for(self, index: int) -> str:
         return self.paths[index].name if self.paths else f"image {index + 1}"
 
-    def _select_from_click(self, event: tk.Event[Any]) -> None:
+    def _select_from_click(self, event: tk.Event) -> None:
         if self.image_count == 0:
             return
         index = int(self.canvas.canvasx(event.x) // self.cell_width)
@@ -254,7 +278,6 @@ class ImageBrowser(ttk.Frame):
                      self.cell_height) * self.columns
         if 0 <= index < self.image_count:
             self.selected_index = index
-            self.thumbnail_images.clear()
             self._redraw()
             self._update_info()
 
@@ -282,7 +305,7 @@ class ImageBrowser(ttk.Frame):
         path = self.paths[self.selected_index] if self.paths else None
         self.predict_callback(path, image, self._name_for(self.selected_index))
 
-    def _on_mousewheel(self, event: tk.Event[Any]) -> None:
+    def _on_mousewheel(self, event: tk.Event) -> None:
         self.canvas.yview_scroll(int(-event.delta / 120) or -1, "units")
         self._redraw()
 
@@ -334,6 +357,10 @@ class CNNDesktopApp(tk.Tk):
 
         self.operation_buttons: dict[str, ttk.Button] = {}
         self.progress_bars: dict[str, ttk.Progressbar] = {}
+        self.trained_epochs_label = ttk.Label(panel, text="")
+        self.trained_epochs_label.grid(
+            row=2, column=0, sticky="w", padx=5, pady=(4, 0)
+        )
         training_options = ttk.Frame(panel)
         training_options.grid(
             row=1, column=0, sticky="ew", padx=5, pady=(4, 0))
@@ -360,6 +387,16 @@ class CNNDesktopApp(tk.Tk):
                 command=self._operation_command(key),
             )
             button.grid(row=0, column=column, sticky="ew", padx=5)
+            if key == "evaluate":
+                self.confusion_matrix_button = ttk.Button(
+                    panel,
+                    text="Open confusion matrix",
+                    command=self._open_confusion_matrix,
+                    state="normal" if Path("confusion_matrix.png").is_file() else "disabled",
+                )
+                self.confusion_matrix_button.grid(
+                    row=1, column=column, sticky="ew", padx=5, pady=(4, 0)
+                )
             checkpoint_ready = key == "train" and MODEL_PATH.is_file()
             progress = ttk.Progressbar(
                 panel,
@@ -367,21 +404,46 @@ class CNNDesktopApp(tk.Tk):
                 maximum=1,
                 value=1 if checkpoint_ready else 0,
             )
-            progress.grid(row=2, column=column,
-                          sticky="ew", padx=5, pady=(8, 0))
+            progress.grid(row=2, column=column, sticky="ew", padx=5, pady=(8, 0))
             self.operation_buttons[key] = button
             self.progress_bars[key] = progress
 
         self.status = ttk.Label(panel, text="Ready", anchor="w")
-        self.status.grid(row=3, column=0, columnspan=3,
-                         sticky="ew", padx=5, pady=(8, 0))
-
-    def _operation_command(self, operation: str) -> Callable[[], None]:
-        return lambda: self._start(operation)
+        self.status.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=(8, 0))
 
     @staticmethod
     def _validate_epoch_input(value: str) -> bool:
         return value == "" or value.isdigit()
+
+    def _refresh_trained_epochs(self) -> None:
+        self.trained_epochs_label.configure(text="")
+        if not MODEL_PATH.is_file() or not MODEL_METADATA_PATH.is_file():
+            return
+        try:
+            with MODEL_METADATA_PATH.open(encoding="utf-8") as metadata_file:
+                metadata = json.load(metadata_file)
+            epochs = metadata.get("epochs")
+            if isinstance(epochs, int) and epochs > 0:
+                self.trained_epochs_label.configure(
+                    text=f"Trained for {epochs} epochs"
+                )
+        except (OSError, ValueError, TypeError):
+            return
+
+    def _open_confusion_matrix(self) -> None:
+        confusion_matrix_path = Path("confusion_matrix.png").resolve()
+        if not confusion_matrix_path.is_file():
+            self.confusion_matrix_button.configure(state="disabled")
+            messagebox.showerror(
+                "Confusion matrix unavailable",
+                "Run model evaluation before opening the confusion matrix.",
+            )
+            return
+        if not webbrowser.open(confusion_matrix_path.as_uri()):
+            messagebox.showerror(
+                "Unable to open confusion matrix",
+                f"Could not open {confusion_matrix_path}.",
+            )
 
     def _build_prediction_panel(self) -> None:
         panel = ttk.LabelFrame(
@@ -540,6 +602,7 @@ class CNNDesktopApp(tk.Tk):
         self.status.configure(text=f"{operation.title()} is running...")
         for button in self.operation_buttons.values():
             button.configure(state="disabled")
+        self.confusion_matrix_button.configure(state="disabled")
         self.epochs_spinbox.configure(state="disabled")
         self.choose_button.configure(state="disabled")
         progress = self.progress_bars[operation]
@@ -657,6 +720,11 @@ class CNNDesktopApp(tk.Tk):
         self.future = None
         for button in self.operation_buttons.values():
             button.configure(state="normal")
+        self.confusion_matrix_button.configure(
+            state="normal"
+            if Path("confusion_matrix.png").is_file()
+            else "disabled"
+        )
         self.epochs_spinbox.configure(state="normal")
         self.choose_button.configure(state="normal")
 
@@ -669,6 +737,8 @@ class CNNDesktopApp(tk.Tk):
             self.status.configure(text=f"{operation.title()} failed")
             return
         progress.configure(mode="determinate", value=progress["maximum"])
+        if operation == "train":
+            self._refresh_trained_epochs()
         if operation == "evaluate" and self.evaluation_accuracy is not None:
             self.status.configure(
                 text="Evaluate completed - accuracy:"

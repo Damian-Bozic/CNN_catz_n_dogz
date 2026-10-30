@@ -1,3 +1,4 @@
+import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -71,6 +72,9 @@ def train_model(
             progress_callback(epoch + 1, epochs)
 
     torch.save(model.state_dict(), "/tmp/cat_dog_cnn.pth")
+    with open("/tmp/cat_dog_cnn.metadata.json",
+              "w", encoding="utf-8") as metadata_file:
+        json.dump({"epochs": epochs}, metadata_file)
     print("Training finished. Model saved to '/tmp/cat_dog_cnn.pth'.")
 
 
