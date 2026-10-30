@@ -1,11 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from collections.abc import Callable
 from dataset import get_data_loaders
 from model import CatDogCNN
 
 
-def train_model(epochs=5, batch_size=32, lr=0.001):
+def train_model(
+    epochs=5,
+    batch_size=32,
+    lr=0.001,
+    progress_callback: Callable[[int, int], None] | None = None,
+):
     # Wybór urządzenia (GPU/CUDA jeśli dostępne, inaczej CPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Używane urządzenie do treningu: {device}")
@@ -59,6 +65,8 @@ def train_model(epochs=5, batch_size=32, lr=0.001):
         test_acc = (correct_test / total_test) * 100
         print(
             f"Epoka [{epoch + 1}/{epochs}] -> Strata: {epoch_loss:.4f} | Celność Train: {epoch_acc:.2f}% | Celność Test: {test_acc:.2f}%")
+        if progress_callback is not None:
+            progress_callback(epoch + 1, epochs)
 
     # Zamiast starej ścieżki wpisz nową lokalizację w /tmp/
     torch.save(model.state_dict(), "/tmp/cat_dog_cnn.pth")

@@ -2,13 +2,16 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from collections.abc import Callable
 from sklearn.metrics import classification_report, confusion_matrix, \
     ConfusionMatrixDisplay
 from dataset import get_data_loaders
 from model import CatDogCNN
 
 
-def evaluate_model():
+def evaluate_model(
+    progress_callback: Callable[[int, int], None] | None = None,
+):
     # 1. Ustawienie urządzenia
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Ewaluacja na urządzeniu: {device}")
@@ -33,14 +36,17 @@ def evaluate_model():
     all_labels = []
 
     print("Zbieranie predykcji ze zbioru testowego...")
+    total_batches = len(test_loader)
     with torch.no_grad():
-        for images, labels in test_loader:
+        for batch_number, (images, labels) in enumerate(test_loader, start=1):
             images = images.to(device)
             outputs = model(images)
             _, predicted = torch.max(outputs, 1)
 
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.numpy())
+            if progress_callback is not None:
+                progress_callback(batch_number, total_batches)
 
     # 3. Generowanie raportu klasyfikacji
     classes = ['Kot', 'Pies']
