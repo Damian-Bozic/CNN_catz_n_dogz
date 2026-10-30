@@ -3,6 +3,7 @@ import queue
 import re
 import signal
 import sys
+import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -45,21 +46,31 @@ class GuiOutput(io.TextIOBase):
             self.buffer = ""
 
 
+ImageLoader = Callable[[int], Image.Image]
+BrowserSelection = Callable[[Path | None, Image.Image, str], None]
+
+
 class ImageBrowser(ttk.Frame):
     def __init__(
         self,
         parent: tk.Misc,
         title: str,
-        folder: Path,
-        predict_callback: Callable[[Path], None],
+        predict_callback: BrowserSelection,
+        folder: Path | None = None,
     ) -> None:
         super().__init__(parent, padding=10)
         self.folder = folder
         self.title = title
         self.predict_callback = predict_callback
         self.paths: list[Path] = []
-        self.index = -1
-        self.photo: ImageTk.PhotoImage | None = None
+        self.image_loader: ImageLoader | None = None
+        self.labels: list[str] = []
+        self.image_count = 0
+        self.selected_index: int | None = None
+        self.thumbnail_images: dict[int, ImageTk.PhotoImage] = {}
+        self.columns = 1
+        self.cell_width = 170
+        self.cell_height = 160
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -67,92 +78,181 @@ class ImageBrowser(ttk.Frame):
             row=0, column=0, sticky="w", pady=(0, 8)
         )
 
-        self.preview = ttk.Label(self, anchor="center", text="No image selected")
-        self.preview.grid(row=1, column=0, sticky="nsew")
-        self.preview.bind("<Configure>", self._refresh_preview)
+        browser = ttk.Frame(self)
+        browser.grid(row=1, column=0, sticky="nsew")
+        browser.columnconfigure(0, weight=1)
+        browser.rowconfigure(0, weight=1)
+        self.canvas = tk.Canvas(browser, highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            browser, orient="vertical", command=self._scrollbar_yview
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.bind("<Configure>", self._redraw)
+        self.canvas.bind("<Button-1>", self._select_from_click)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda _event: self.canvas.yview_scroll(-3, "units"))
+        self.canvas.bind("<Button-5>", lambda _event: self.canvas.yview_scroll(3, "units"))
 
         controls = ttk.Frame(self)
         controls.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        controls.columnconfigure(1, weight=1)
-        self.previous_button = ttk.Button(
-            controls, text="Previous", command=self.previous
-        )
-        self.previous_button.grid(row=0, column=0, padx=(0, 8))
-        self.position = ttk.Label(controls, text="0 / 0")
-        self.position.grid(row=0, column=1)
-        self.next_button = ttk.Button(controls, text="Next", command=self.next)
-        self.next_button.grid(row=0, column=2, padx=(8, 0))
+        controls.columnconfigure(0, weight=1)
         self.predict_button = ttk.Button(
-            controls, text="Predict selected image", command=self._predict_current
+            controls, text="Predict selected image", command=self._predict_current,
+            state="disabled",
         )
-        self.predict_button.grid(row=0, column=3, padx=(8, 0))
+        self.predict_button.grid(row=0, column=1, padx=(8, 0))
 
         self.info = ttk.Label(self, text="", anchor="w")
         self.info.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        self.reload()
-        self.after_idle(self._refresh_preview)
+        if folder is not None:
+            self.set_local_source(folder)
 
-    def reload(self) -> None:
+    def set_local_source(self, folder: Path) -> None:
+        self.folder = folder
         self.paths = sorted(
             path
-            for path in self.folder.rglob("*")
+            for path in folder.rglob("*")
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
         )
-        self.index = 0 if self.paths else -1
-        self._show_current()
+        self.labels = [
+            path.parent.name if path.parent != folder else "Unlabelled"
+            for path in self.paths
+        ]
+        self.image_count = len(self.paths)
+        self.image_loader = self._load_local_image
+        self._reset_source()
 
-    def previous(self) -> None:
-        if self.paths:
-            self.index = (self.index - 1) % len(self.paths)
-            self._show_current()
+    def set_dataset_source(
+        self,
+        dataset: object,
+        image_count: int,
+        label_loader: Callable[[int], str],
+    ) -> None:
+        self.folder = None
+        self.paths = []
+        self.labels = [label_loader(index) for index in range(image_count)]
+        self.image_count = image_count
+        self.image_loader = lambda index: dataset[index]["image"].convert("RGB")
+        self._reset_source()
 
-    def next(self) -> None:
-        if self.paths:
-            self.index = (self.index + 1) % len(self.paths)
-            self._show_current()
+    def set_loading(self, message: str) -> None:
+        self.image_count = 0
+        self.image_loader = None
+        self.canvas.delete("all")
+        self.info.configure(text=message)
+        self.predict_button.configure(state="disabled")
 
-    def _show_current(self) -> None:
-        if self.index < 0:
-            self.preview.configure(image="", text=f"No images found in {self.folder}")
-            self.position.configure(text="0 / 0")
-            self.info.configure(text="")
-            self._set_navigation(False)
+    def _reset_source(self) -> None:
+        self.selected_index = 0 if self.image_count else None
+        self.thumbnail_images.clear()
+        self._redraw()
+        self._update_info()
+
+    def _load_local_image(self, index: int) -> Image.Image:
+        return Image.open(self.paths[index]).convert("RGB")
+
+    def _redraw(self, _event: tk.Event | None = None) -> None:
+        if self.image_count == 0 or self.image_loader is None:
+            self.canvas.delete("all")
             return
+        self.columns = max(1, self.canvas.winfo_width() // self.cell_width)
+        rows = (self.image_count + self.columns - 1) // self.columns
+        self.canvas.configure(scrollregion=(0, 0, self.columns * self.cell_width, rows * self.cell_height))
+        first_row = max(0, int(self.canvas.canvasy(0) // self.cell_height))
+        last_row = min(rows, first_row + int(self.canvas.winfo_height() // self.cell_height) + 2)
+        self.canvas.delete("thumbnail")
+        self.thumbnail_images.clear()
+        for index in range(first_row * self.columns, min(last_row * self.columns, self.image_count)):
+            self._draw_thumbnail(index)
 
-        path = self.paths[self.index]
-        self.position.configure(text=f"{self.index + 1} / {len(self.paths)}")
-        label = path.parent.name if path.parent != self.folder else "Unlabelled"
-        self.info.configure(text=f"{path.name}    Class: {label}")
-        self._set_navigation(True)
-        self._refresh_preview()
+    def _draw_thumbnail(self, index: int) -> None:
+        try:
+            image = self.image_loader(index)
+            image.thumbnail((145, 120), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            image.close()
+        except (OSError, ValueError, KeyError) as error:
+            self.canvas.create_text(
+                self._x_for(index) + self.cell_width / 2,
+                self._y_for(index) + 60,
+                text=f"Unreadable\n{error}",
+                tags=("thumbnail", f"image-{index}"),
+            )
+            return
+        self.thumbnail_images[index] = photo
+        self.canvas.create_image(
+            self._x_for(index) + self.cell_width / 2,
+            self._y_for(index) + 58,
+            image=photo,
+            tags=("thumbnail", f"image-{index}"),
+        )
+        self.canvas.create_text(
+            self._x_for(index) + self.cell_width / 2,
+            self._y_for(index) + 140,
+            text=f"{index + 1}: {self._name_for(index)}",
+            tags=("thumbnail", f"image-{index}"),
+        )
+        if index == self.selected_index:
+            self.canvas.create_rectangle(
+                self._x_for(index) + 3,
+                self._y_for(index) + 3,
+                self._x_for(index) + self.cell_width - 3,
+                self._y_for(index) + self.cell_height - 3,
+                outline="#2a7fff",
+                width=3,
+                tags=("thumbnail",),
+            )
 
-    def _set_navigation(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self.previous_button.configure(state=state)
-        self.next_button.configure(state=state)
-        self.predict_button.configure(state=state)
+    def _x_for(self, index: int) -> int:
+        return (index % self.columns) * self.cell_width
+
+    def _y_for(self, index: int) -> int:
+        return (index // self.columns) * self.cell_height
+
+    def _name_for(self, index: int) -> str:
+        return self.paths[index].name if self.paths else f"image {index + 1}"
+
+    def _select_from_click(self, event: tk.Event) -> None:
+        if self.image_count == 0:
+            return
+        index = int(self.canvas.canvasx(event.x) // self.cell_width)
+        index += int(self.canvas.canvasy(event.y) // self.cell_height) * self.columns
+        if 0 <= index < self.image_count:
+            self.selected_index = index
+            self.thumbnail_images.clear()
+            self._redraw()
+            self._update_info()
+
+    def _update_info(self) -> None:
+        if self.selected_index is None:
+            self.info.configure(text="No images available")
+            self.predict_button.configure(state="disabled")
+            return
+        self.info.configure(
+            text=f"{self.selected_index + 1} / {self.image_count}    {self._name_for(self.selected_index)}"
+        )
+        self.predict_button.configure(state="normal")
 
     def _predict_current(self) -> None:
-        if self.index >= 0:
-            self.predict_callback(self.paths[self.index])
-
-    def _refresh_preview(self, _event: tk.Event | None = None) -> None:
-        if self.index < 0:
+        if self.selected_index is None or self.image_loader is None:
             return
-        path = self.paths[self.index]
         try:
-            with Image.open(path) as image:
-                image = image.convert("RGB")
-                available_width = max(self.preview.winfo_width() - 20, 100)
-                available_height = max(self.preview.winfo_height() - 20, 100)
-                image.thumbnail((available_width, available_height), Image.Resampling.LANCZOS)
-                self.photo = ImageTk.PhotoImage(image)
+            image = self.image_loader(self.selected_index)
         except (OSError, ValueError) as error:
-            self.photo = None
-            self.preview.configure(image="", text=f"Unable to read {path.name}: {error}")
+            self.info.configure(text=f"Unable to read selected image: {error}")
             return
-        self.preview.configure(image=self.photo, text="")
+        path = self.paths[self.selected_index] if self.paths else None
+        self.predict_callback(path, image, self._name_for(self.selected_index))
 
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        self.canvas.yview_scroll(int(-event.delta / 120) or -1, "units")
+        self._redraw()
+
+    def _scrollbar_yview(self, *args: str) -> None:
+        self.canvas.yview(*args)
+        self._redraw()
 
 class CNNDesktopApp(tk.Tk):
     def __init__(self) -> None:
@@ -167,9 +267,13 @@ class CNNDesktopApp(tk.Tk):
         self.operation: str | None = None
         self.future: Future[None] | None = None
         self.selected_image: Path | None = None
+        self.selected_temp_image: Path | None = None
         self.selected_photo: ImageTk.PhotoImage | None = None
         self.evaluation_accuracy: str | None = None
         self.epochs_var = tk.StringVar(value="5")
+        self.training_browser: ImageBrowser | None = None
+        self.browser_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-browser")
+        self.training_dataset_future: Future[object] | None = None
 
         self._build_operation_panel()
         self._build_prediction_panel()
@@ -243,17 +347,41 @@ class CNNDesktopApp(tk.Tk):
         testing = ImageBrowser(
             notebook,
             "Testing dataset: testing_data/",
-            ROOT / "testing_data",
             self._predict_browser_image,
+            ROOT / "testing_data",
         )
         training = ImageBrowser(
             notebook,
-            "Training image browser: testowe/ (local image collection)",
-            ROOT / "testowe",
+            "Training dataset: Hugging Face microsoft/cats_vs_dogs",
             self._predict_browser_image,
+        )
+        training.set_loading("Loading the training dataset...")
+        self.training_browser = training
+        self.training_dataset_future = self.browser_executor.submit(
+            self._load_training_dataset
         )
         notebook.add(testing, text="Testing images")
         notebook.add(training, text="Training images")
+
+    @staticmethod
+    def _load_training_dataset() -> object:
+        import torch
+        from datasets import load_dataset
+        from torch.utils.data import random_split
+
+        raw_dataset = load_dataset(
+            "microsoft/cats_vs_dogs",
+            split="train",
+            cache_dir="/goinfre/krbartos",
+        )
+        train_size = int(0.8 * len(raw_dataset))
+        test_size = len(raw_dataset) - train_size
+        train_dataset, _ = random_split(
+            raw_dataset,
+            [train_size, test_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+        return train_dataset
 
     def _choose_image(self) -> None:
         path = filedialog.askopenfilename(
@@ -268,6 +396,7 @@ class CNNDesktopApp(tk.Tk):
         self._set_selected_image(Path(path))
 
     def _set_selected_image(self, path: Path) -> None:
+        self._clear_selected_temp_image()
         self.selected_image = path
         self.image_name.configure(text=str(self.selected_image))
         try:
@@ -281,10 +410,29 @@ class CNNDesktopApp(tk.Tk):
         self.image_preview.configure(image=self.selected_photo)
         self.prediction_result.configure(text="Ready to predict")
 
-    def _predict_browser_image(self, path: Path) -> None:
+    def _predict_browser_image(
+        self, path: Path | None, image: Image.Image, name: str
+    ) -> None:
         if self.operation is not None:
             return
-        self._set_selected_image(path)
+        if path is None:
+            self._clear_selected_temp_image()
+            temporary = tempfile.NamedTemporaryFile(
+                suffix=Path(name).suffix or ".png", delete=False
+            )
+            temporary_path = Path(temporary.name)
+            temporary.close()
+            image.save(temporary_path)
+            self.selected_temp_image = temporary_path
+            self.selected_image = temporary_path
+            display_image = image.copy()
+            self.image_name.configure(text=name)
+            display_image.thumbnail((180, 120), Image.Resampling.LANCZOS)
+            self.selected_photo = ImageTk.PhotoImage(display_image)
+            self.image_preview.configure(image=self.selected_photo)
+            self.prediction_result.configure(text="Ready to predict")
+        else:
+            self._set_selected_image(path)
         self._start("predict")
 
     def _start(self, operation: str) -> None:
@@ -353,6 +501,22 @@ class CNNDesktopApp(tk.Tk):
             self.messages.put(("error", f"{type(error).__name__}: {error}"))
 
     def _poll_messages(self) -> None:
+        if self.training_dataset_future is not None and self.training_dataset_future.done():
+            future = self.training_dataset_future
+            self.training_dataset_future = None
+            try:
+                dataset = future.result()
+                if self.training_browser is not None:
+                    self.training_browser.set_dataset_source(
+                        dataset,
+                        len(dataset),
+                        lambda index: ("Cat" if dataset[index]["labels"] == 0 else "Dog"),
+                    )
+            except Exception as error:
+                if self.training_browser is not None:
+                    self.training_browser.set_loading(
+                        f"Unable to load training data: {error}"
+                    )
         try:
             while True:
                 kind, value = self.messages.get_nowait()
@@ -422,6 +586,14 @@ class CNNDesktopApp(tk.Tk):
             return
         self.status.configure(text=f"{operation.title()} completed")
 
+    def _clear_selected_temp_image(self) -> None:
+        if self.selected_temp_image is not None:
+            try:
+                self.selected_temp_image.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.selected_temp_image = None
+
     def _reset_operation_state(self) -> None:
         self.operation = None
 
@@ -435,6 +607,8 @@ class CNNDesktopApp(tk.Tk):
         self._destroy_window()
 
     def _destroy_window(self) -> None:
+        self._clear_selected_temp_image()
+        self.browser_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
