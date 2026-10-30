@@ -1,0 +1,16 @@
+[project]
+name = "rush-nn"
+version = "0.1.0"
+description = "Klasyfikator kotów i psów przy użyciu sieci CNN w PyTorch dla projektu 42"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "pillow>=10.0.0",
+    "datasets>=5.1.0",
+]
+
+[tool.uv]
+managed = true
+package = false
