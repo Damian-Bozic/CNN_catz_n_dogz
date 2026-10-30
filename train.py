@@ -6,15 +6,12 @@ from model import CatDogCNN
 
 
 def train_model(epochs=5, batch_size=32, lr=0.001):
-    # Wybór urządzenia (GPU/CUDA jeśli dostępne, inaczej CPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Używane urządzenie do treningu: {device}")
 
-    # Załadowanie danych i inicjalizacja modelu
     train_loader, test_loader = get_data_loaders(batch_size=batch_size)
     model = CatDogCNN().to(device)
 
-    # Definicja funkcji straty i optymalizatora
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -43,7 +40,6 @@ def train_model(epochs=5, batch_size=32, lr=0.001):
         epoch_loss = running_loss / len(train_loader.dataset)
         epoch_acc = (correct_train / total_train) * 100
 
-        # Ewaluacja na zbiorze testowym
         model.eval()
         correct_test = 0
         total_test = 0
@@ -58,7 +54,11 @@ def train_model(epochs=5, batch_size=32, lr=0.001):
 
         test_acc = (correct_test / total_test) * 100
         print(
-            f"Epoka [{epoch + 1}/{epochs}] -> Strata: {epoch_loss:.4f} | Celność Train: {epoch_acc:.2f}% | Celność Test: {test_acc:.2f}%")
+            f"Epoka [{epoch + 1}/{epochs}] -> Strata: {epoch_loss:.4f}",
+            f"Celność Train: {epoch_acc:.2f}%",
+            f"Celność Test: {test_acc:.2f}%",
+            sep=" | "
+        )
 
     torch.save(model.state_dict(), "cat_dog_cnn.pth")
     print("Trening zakończony! Model zapisano jako 'cat_dog_cnn.pth'")
