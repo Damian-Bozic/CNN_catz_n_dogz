@@ -197,13 +197,21 @@ class ImageBrowser(ttk.Frame):
 
         self.columns = max(1, self.canvas.winfo_width() // self.cell_width)
         rows = (self.image_count + self.columns - 1) // self.columns
-        self.canvas.configure(scrollregion=(0, 0, self.columns * self.cell_width, rows * self.cell_height))
+        self.canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                self.columns * self.cell_width,
+                rows * self.cell_height
+            )
+        )
         first_row = max(0, int(self.canvas.canvasy(0) // self.cell_height))
         last_row = min(rows, first_row +
                        int(self.canvas.winfo_height() // self.cell_height) + 2)
         self.canvas.delete("thumbnail")
         self.thumbnail_images.clear()
-        for index in range(first_row * self.columns, min(last_row * self.columns, self.image_count)):
+        for index in range(first_row * self.columns,
+                           min(last_row * self.columns, self.image_count)):
             self._draw_thumbnail(index)
         visible_start = first_row * self.columns
         visible_end = min(last_row * self.columns, self.image_count)
@@ -222,10 +230,11 @@ class ImageBrowser(ttk.Frame):
         self._redraw()
 
     def _draw_thumbnail(self, index: int) -> None:
+        image_loader = self.image_loader
+        if image_loader is None:
+            return
         try:
-            if image is None:
-                throw ValueError("Image cannot be none")
-            image = self.image_loader(index)
+            image = image_loader(index)
             image.thumbnail((145, 120), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
             image.close()
@@ -392,7 +401,8 @@ class CNNDesktopApp(tk.Tk):
                     panel,
                     text="Open confusion matrix",
                     command=self._open_confusion_matrix,
-                    state="normal" if Path("confusion_matrix.png").is_file() else "disabled",
+                    state="normal" if Path(
+                        "confusion_matrix.png").is_file() else "disabled",
                 )
                 self.confusion_matrix_button.grid(
                     row=1, column=column, sticky="ew", padx=5, pady=(4, 0)
@@ -404,12 +414,17 @@ class CNNDesktopApp(tk.Tk):
                 maximum=1,
                 value=1 if checkpoint_ready else 0,
             )
-            progress.grid(row=2, column=column, sticky="ew", padx=5, pady=(8, 0))
+            progress.grid(row=2, column=column,
+                          sticky="ew", padx=5, pady=(8, 0))
             self.operation_buttons[key] = button
             self.progress_bars[key] = progress
 
         self.status = ttk.Label(panel, text="Ready", anchor="w")
-        self.status.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=(8, 0))
+        self.status.grid(row=3, column=0, columnspan=3,
+                         sticky="ew", padx=5, pady=(8, 0))
+
+    def _operation_command(self, operation: str) -> Callable[[], None]:
+        return lambda: self._start(operation)
 
     @staticmethod
     def _validate_epoch_input(value: str) -> bool:
