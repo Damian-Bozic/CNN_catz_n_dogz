@@ -1,41 +1,49 @@
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
-import os
 from collections.abc import Callable
+from pathlib import Path
+
 from sklearn.metrics import classification_report, confusion_matrix, \
     ConfusionMatrixDisplay
+
 from dataset import get_data_loaders
 from model import CatDogCNN
+
+MODEL_PATH = Path("/tmp/cat_dog_cnn.pth")
 
 
 def evaluate_model(
     progress_callback: Callable[[int, int], None] | None = None,
-):
-    # 1. Ustawienie urządzenia
+) -> None:
+    # 1. Select the device.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Ewaluacja na urządzeniu: {device}")
+    print(f"Evaluation device: {device}")
 
-    # 2. Załadowanie danych testowych i modelu
+    # 2. Check for the trained model before downloading the test data.
+    if not MODEL_PATH.is_file():
+        print(
+            f"Error: model weights '{MODEL_PATH}' were not found.",
+            "Train the model first!"
+        )
+        return
+
+    # 3. Load the test data and model.
     _, test_loader = get_data_loaders(batch_size=64)
     model = CatDogCNN().to(device)
 
-    # Wskaż nową ścieżkę w /tmp/
-    model_path = "/tmp/cat_dog_cnn.pth"
-
-    if not os.path.exists(model_path):
-        print(
-            f"Błąd: Nie znaleziono pliku wag '{model_path}'. Najpierw wytrenuj model!")
-        return
-
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    state_dict = torch.load(
+        MODEL_PATH,
+        map_location=device,
+        weights_only=True,
+    )
+    model.load_state_dict(state_dict)
 
     model.eval()
 
-    all_preds = []
-    all_labels = []
+    all_preds: list[int] = []
+    all_labels: list[int] = []
 
-    print("Zbieranie predykcji ze zbioru testowego...")
+    print("Collecting predictions from the test set...")
     total_batches = len(test_loader)
     with torch.no_grad():
         for batch_number, (images, labels) in enumerate(test_loader, start=1):
@@ -48,25 +56,27 @@ def evaluate_model(
             if progress_callback is not None:
                 progress_callback(batch_number, total_batches)
 
-    # 3. Generowanie raportu klasyfikacji
-    classes = ['Kot', 'Pies']
-    print("\n--- SZCZEGÓŁOWE STATYSTYKI TESTOWE ---")
+    # 4. Generate the classification report.
+    classes = ["Cat", "Dog"]
+    print("\n--- TEST CLASSIFICATION REPORT ---")
     print(classification_report(all_labels, all_preds, target_names=classes))
 
-    # 4. Generowanie i zapisywanie Macierzy Pomyłek
+    # 5. Generate and save the confusion matrix.
     cm = confusion_matrix(all_labels, all_preds)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
 
-    # Rysowanie wykresu
+    # Draw the chart.
     fig, ax = plt.subplots(figsize=(6, 6))
-    disp.plot(ax=ax, cmap=plt.cm.Blues, values_format='d')
-    plt.title('Macierz Pomyłek - Kot vs Pies')
+    disp.plot(ax=ax, cmap="Blues", values_format="d")
+    plt.title("Confusion matrix: cat vs. dog")
+    fig.tight_layout()
 
-    # Zapis do pliku tekstowego/graficznego
+    # Save the chart.
     output_graph = "confusion_matrix.png"
-    plt.savefig(output_graph)
+    fig.savefig(output_graph)
+    plt.close(fig)
     print(
-        f"\n[SUKCES] Macierz pomyłek została zapisana jako plik: '{output_graph}'")
+        f"\nSaved the confusion matrix to '{output_graph}'.")
 
 
 if __name__ == "__main__":

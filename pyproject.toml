@@ -1,7 +1,7 @@
 [project]
 name = "rush-nn"
 version = "0.1.0"
-description = "Klasyfikator kotów i psów przy użyciu sieci CNN w PyTorch dla projektu 42"
+description = "Cat and dog classifier using a PyTorch CNN"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,3 +16,7 @@ dependencies = [
 [tool.uv]
 managed = true
 package = false
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

@@ -7,7 +7,8 @@ import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Callable, TextIO
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol, TextIO, cast
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -19,10 +20,21 @@ MODEL_PATH = Path("/tmp/cat_dog_cnn.pth")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 
+class ImageDataset(Protocol):
+    def __len__(self) -> int:
+        ...
+
+    def __getitem__(self, idx: int) -> Mapping[str, object]:
+        ...
+
+
+MessageValue = str | tuple[int, int] | None
+
+
 class GuiOutput(io.TextIOBase):
     def __init__(
         self,
-        messages: queue.Queue[tuple[str, object]],
+        messages: queue.Queue[tuple[str, MessageValue]],
         cli_stream: TextIO | None,
     ) -> None:
         self.messages = messages
@@ -60,7 +72,7 @@ class ImageBrowser(ttk.Frame):
     ) -> None:
         super().__init__(parent, padding=10)
         self.folder = folder
-        self.title = title
+        self.browser_title = title
         self.predict_callback = predict_callback
         self.paths: list[Path] = []
         self.image_loader: ImageLoader | None = None
@@ -92,20 +104,24 @@ class ImageBrowser(ttk.Frame):
         self.canvas.bind("<Configure>", self._redraw)
         self.canvas.bind("<Button-1>", self._select_from_click)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Button-4>", lambda _event: self.canvas.yview_scroll(-3, "units"))
-        self.canvas.bind("<Button-5>", lambda _event: self.canvas.yview_scroll(3, "units"))
+        self.canvas.bind(
+            "<Button-4>", lambda event: self._scroll_fixed(-3, event))
+        self.canvas.bind(
+            "<Button-5>", lambda event: self._scroll_fixed(3, event))
 
         controls = ttk.Frame(self)
         controls.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         controls.columnconfigure(0, weight=1)
         self.predict_button = ttk.Button(
-            controls, text="Predict selected image", command=self._predict_current,
+            controls,
+            text="Predict selected image",
+            command=self._predict_current,
             state="disabled",
         )
         self.predict_button.grid(row=0, column=1, padx=(8, 0))
 
-        self.info = ttk.Label(self, text="", anchor="w")
-        self.info.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.info_label = ttk.Label(self, text="", anchor="w")
+        self.info_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         if folder is not None:
             self.set_local_source(folder)
 
@@ -126,7 +142,7 @@ class ImageBrowser(ttk.Frame):
 
     def set_dataset_source(
         self,
-        dataset: object,
+        dataset: ImageDataset,
         image_count: int,
         label_loader: Callable[[int], str],
     ) -> None:
@@ -134,14 +150,19 @@ class ImageBrowser(ttk.Frame):
         self.paths = []
         self.labels = [label_loader(index) for index in range(image_count)]
         self.image_count = image_count
-        self.image_loader = lambda index: dataset[index]["image"].convert("RGB")
+
+        def load_image(index: int) -> Image.Image:
+            image = cast(Image.Image, dataset[index]["image"])
+            return image.convert("RGB")
+
+        self.image_loader = load_image
         self._reset_source()
 
     def set_loading(self, message: str) -> None:
         self.image_count = 0
         self.image_loader = None
         self.canvas.delete("all")
-        self.info.configure(text=message)
+        self.info_label.configure(text=message)
         self.predict_button.configure(state="disabled")
 
     def _reset_source(self) -> None:
@@ -153,24 +174,33 @@ class ImageBrowser(ttk.Frame):
     def _load_local_image(self, index: int) -> Image.Image:
         return Image.open(self.paths[index]).convert("RGB")
 
-    def _redraw(self, _event: tk.Event | None = None) -> None:
+    def _redraw(self, _event: tk.Event[Any] | None = None) -> None:
+        del _event
         if self.image_count == 0 or self.image_loader is None:
             self.canvas.delete("all")
             return
         self.columns = max(1, self.canvas.winfo_width() // self.cell_width)
         rows = (self.image_count + self.columns - 1) // self.columns
-        self.canvas.configure(scrollregion=(0, 0, self.columns * self.cell_width, rows * self.cell_height))
+        self.canvas.configure(scrollregion=(
+            0, 0, self.columns * self.cell_width, rows * self.cell_height))
         first_row = max(0, int(self.canvas.canvasy(0) // self.cell_height))
-        last_row = min(rows, first_row + int(self.canvas.winfo_height() // self.cell_height) + 2)
+        last_row = min(rows, first_row +
+                       int(self.canvas.winfo_height() // self.cell_height) + 2)
         self.canvas.delete("thumbnail")
         self.thumbnail_images.clear()
-        for index in range(first_row * self.columns, min(last_row * self.columns, self.image_count)):
+        for index in range(
+            first_row * self.columns,
+            min(last_row * self.columns, self.image_count)
+        ):
             self._draw_thumbnail(index)
 
     def _draw_thumbnail(self, index: int) -> None:
         try:
-            image = self.image_loader(index)
-            image.thumbnail((145, 120), Image.Resampling.LANCZOS)
+            image_loader = self.image_loader
+            if image_loader is None:
+                return
+            image = image_loader(index)
+            image.thumbnail((145, 120), getattr(Image, "Resampling").LANCZOS)
             photo = ImageTk.PhotoImage(image)
             image.close()
         except (OSError, ValueError, KeyError) as error:
@@ -214,11 +244,12 @@ class ImageBrowser(ttk.Frame):
     def _name_for(self, index: int) -> str:
         return self.paths[index].name if self.paths else f"image {index + 1}"
 
-    def _select_from_click(self, event: tk.Event) -> None:
+    def _select_from_click(self, event: tk.Event[Any]) -> None:
         if self.image_count == 0:
             return
         index = int(self.canvas.canvasx(event.x) // self.cell_width)
-        index += int(self.canvas.canvasy(event.y) // self.cell_height) * self.columns
+        index += int(self.canvas.canvasy(event.y) //
+                     self.cell_height) * self.columns
         if 0 <= index < self.image_count:
             self.selected_index = index
             self.thumbnail_images.clear()
@@ -227,11 +258,12 @@ class ImageBrowser(ttk.Frame):
 
     def _update_info(self) -> None:
         if self.selected_index is None:
-            self.info.configure(text="No images available")
+            self.info_label.configure(text="No images available")
             self.predict_button.configure(state="disabled")
             return
-        self.info.configure(
-            text=f"{self.selected_index + 1} / {self.image_count}    {self._name_for(self.selected_index)}"
+        self.info_label.configure(
+            text=f"{self.selected_index + 1} / {self.image_count}  "
+            f"  {self._name_for(self.selected_index)}"
         )
         self.predict_button.configure(state="normal")
 
@@ -241,18 +273,26 @@ class ImageBrowser(ttk.Frame):
         try:
             image = self.image_loader(self.selected_index)
         except (OSError, ValueError) as error:
-            self.info.configure(text=f"Unable to read selected image: {error}")
+            self.info_label.configure(
+                text=f"Unable to read selected image: {error}"
+            )
             return
         path = self.paths[self.selected_index] if self.paths else None
         self.predict_callback(path, image, self._name_for(self.selected_index))
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
+    def _on_mousewheel(self, event: tk.Event[Any]) -> None:
         self.canvas.yview_scroll(int(-event.delta / 120) or -1, "units")
+        self._redraw()
+
+    def _scroll_fixed(self, amount: int, _event: tk.Event[Any]) -> None:
+        del _event
+        self.canvas.yview_scroll(amount, "units")
         self._redraw()
 
     def _scrollbar_yview(self, *args: str) -> None:
         self.canvas.yview(*args)
         self._redraw()
+
 
 class CNNDesktopApp(tk.Tk):
     def __init__(self) -> None:
@@ -262,8 +302,9 @@ class CNNDesktopApp(tk.Tk):
         self.minsize(720, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cnn")
+        self.messages: queue.Queue[tuple[str, MessageValue]] = queue.Queue()
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cnn")
         self.operation: str | None = None
         self.future: Future[None] | None = None
         self.selected_image: Path | None = None
@@ -272,8 +313,11 @@ class CNNDesktopApp(tk.Tk):
         self.evaluation_accuracy: str | None = None
         self.epochs_var = tk.StringVar(value="5")
         self.training_browser: ImageBrowser | None = None
-        self.browser_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-browser")
-        self.training_dataset_future: Future[object] | None = None
+        self.browser_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="dataset-browser"
+        )
+        self.training_dataset_future: Future[ImageDataset] | None = None
 
         self._build_operation_panel()
         self._build_prediction_panel()
@@ -289,7 +333,8 @@ class CNNDesktopApp(tk.Tk):
         self.operation_buttons: dict[str, ttk.Button] = {}
         self.progress_bars: dict[str, ttk.Progressbar] = {}
         training_options = ttk.Frame(panel)
-        training_options.grid(row=1, column=0, sticky="ew", padx=5, pady=(4, 0))
+        training_options.grid(
+            row=1, column=0, sticky="ew", padx=5, pady=(4, 0))
         training_options.columnconfigure(1, weight=1)
         ttk.Label(training_options, text="Epochs:").grid(
             row=0, column=0, sticky="w", padx=(0, 4)
@@ -304,9 +349,14 @@ class CNNDesktopApp(tk.Tk):
             validatecommand=(self.register(self._validate_epoch_input), "%P"),
         )
         self.epochs_spinbox.grid(row=0, column=1, sticky="ew")
-        labels = (("train", "Train model"), ("evaluate", "Evaluate model"), ("predict", "Predict one image"))
+        labels = (("train", "Train model"), ("evaluate",
+                  "Evaluate model"), ("predict", "Predict one image"))
         for column, (key, label) in enumerate(labels):
-            button = ttk.Button(panel, text=label, command=lambda key=key: self._start(key))
+            button = ttk.Button(
+                panel,
+                text=label,
+                command=self._operation_command(key),
+            )
             button.grid(row=0, column=column, sticky="ew", padx=5)
             checkpoint_ready = key == "train" and MODEL_PATH.is_file()
             progress = ttk.Progressbar(
@@ -315,31 +365,40 @@ class CNNDesktopApp(tk.Tk):
                 maximum=1,
                 value=1 if checkpoint_ready else 0,
             )
-            progress.grid(row=2, column=column, sticky="ew", padx=5, pady=(8, 0))
+            progress.grid(row=2, column=column,
+                          sticky="ew", padx=5, pady=(8, 0))
             self.operation_buttons[key] = button
             self.progress_bars[key] = progress
 
         self.status = ttk.Label(panel, text="Ready", anchor="w")
-        self.status.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=(8, 0))
+        self.status.grid(row=3, column=0, columnspan=3,
+                         sticky="ew", padx=5, pady=(8, 0))
+
+    def _operation_command(self, operation: str) -> Callable[[], None]:
+        return lambda: self._start(operation)
 
     @staticmethod
     def _validate_epoch_input(value: str) -> bool:
         return value == "" or value.isdigit()
 
     def _build_prediction_panel(self) -> None:
-        panel = ttk.LabelFrame(self, text="Selected image and result", padding=10)
+        panel = ttk.LabelFrame(
+            self, text="Selected image and result", padding=10)
         panel.pack(fill="x", padx=10, pady=5)
         panel.columnconfigure(1, weight=1)
-        self.choose_button = ttk.Button(panel, text="Choose image", command=self._choose_image)
+        self.choose_button = ttk.Button(
+            panel, text="Choose image", command=self._choose_image)
         self.choose_button.grid(
             row=0, column=0, sticky="w"
         )
         self.image_name = ttk.Label(panel, text="No image selected")
         self.image_name.grid(row=0, column=1, sticky="w", padx=10)
         self.image_preview = ttk.Label(panel)
-        self.image_preview.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.image_preview.grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.prediction_result = ttk.Label(panel, text="", anchor="w")
-        self.prediction_result.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.prediction_result.grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     def _build_browsers(self) -> None:
         notebook = ttk.Notebook(self)
@@ -364,15 +423,18 @@ class CNNDesktopApp(tk.Tk):
         notebook.add(training, text="Training images")
 
     @staticmethod
-    def _load_training_dataset() -> object:
+    def _load_training_dataset() -> ImageDataset:
         import torch
         from datasets import load_dataset
         from torch.utils.data import random_split
 
-        raw_dataset = load_dataset(
-            "microsoft/cats_vs_dogs",
-            split="train",
-            cache_dir="/goinfre/krbartos",
+        raw_dataset = cast(
+            Any,
+            load_dataset(
+                "microsoft/cats_vs_dogs",
+                split="train",
+                cache_dir="/tmp/ai-ml-piscine-rush",
+            ),
         )
         train_size = int(0.8 * len(raw_dataset))
         test_size = len(raw_dataset) - train_size
@@ -381,7 +443,7 @@ class CNNDesktopApp(tk.Tk):
             [train_size, test_size],
             generator=torch.Generator().manual_seed(42),
         )
-        return train_dataset
+        return cast(ImageDataset, train_dataset)
 
     def _choose_image(self) -> None:
         path = filedialog.askopenfilename(
@@ -401,11 +463,15 @@ class CNNDesktopApp(tk.Tk):
         self.image_name.configure(text=str(self.selected_image))
         try:
             with Image.open(self.selected_image) as image:
-                image.thumbnail((180, 120), Image.Resampling.LANCZOS)
+                image.thumbnail(
+                    (180, 120),
+                    getattr(Image, "Resampling").LANCZOS
+                )
                 self.selected_photo = ImageTk.PhotoImage(image.convert("RGB"))
         except (OSError, ValueError) as error:
             self.selected_photo = None
-            self.prediction_result.configure(text=f"Unable to display image: {error}")
+            self.prediction_result.configure(
+                text=f"Unable to display image: {error}")
             return
         self.image_preview.configure(image=self.selected_photo)
         self.prediction_result.configure(text="Ready to predict")
@@ -427,7 +493,9 @@ class CNNDesktopApp(tk.Tk):
             self.selected_image = temporary_path
             display_image = image.copy()
             self.image_name.configure(text=name)
-            display_image.thumbnail((180, 120), Image.Resampling.LANCZOS)
+            display_image.thumbnail(
+                (180, 120), getattr(Image, "Resampling").LANCZOS
+            )
             self.selected_photo = ImageTk.PhotoImage(display_image)
             self.image_preview.configure(image=self.selected_photo)
             self.prediction_result.configure(text="Ready to predict")
@@ -453,11 +521,17 @@ class CNNDesktopApp(tk.Tk):
                 epochs = int(self.epochs_var.get())
             except ValueError:
                 self._reset_operation_state()
-                messagebox.showerror("Invalid epochs", "Training epochs must be a positive whole number.")
+                messagebox.showerror(
+                    "Invalid epochs",
+                    "Training epochs must be a positive whole number."
+                )
                 return
             if epochs < 1:
                 self._reset_operation_state()
-                messagebox.showerror("Invalid epochs", "Training epochs must be at least 1.")
+                messagebox.showerror(
+                    "Invalid epochs",
+                    "Training epochs must be at least 1."
+                )
                 return
         else:
             epochs = None
@@ -469,23 +543,33 @@ class CNNDesktopApp(tk.Tk):
         progress = self.progress_bars[operation]
         progress.configure(mode="determinate", value=0)
         if operation == "train":
-            progress.configure(maximum=epochs)
+            if epochs is not None:
+                progress.configure(maximum=float(epochs))
         elif operation == "predict":
             progress.configure(maximum=1)
-        self.future = self.executor.submit(self._run_operation, operation, epochs)
+        self.future = self.executor.submit(
+            self._run_operation, operation, epochs)
 
     def _run_operation(self, operation: str, epochs: int | None) -> None:
         cli_stream = getattr(sys, "__stdout__", None)
         output = GuiOutput(self.messages, cli_stream)
-        progress_callback = lambda current, total: self.messages.put(
-            ("progress", (current, total))
-        )
+
+        def progress_callback(current: int, total: int) -> None:
+            self.messages.put(
+                ("progress", (current, total))
+            )
+
         try:
-            with redirect_stdout(output):
+            with redirect_stdout(cast(TextIO, output)):
                 if operation == "train":
                     from train import train_model
 
-                    train_model(epochs=epochs, progress_callback=progress_callback)
+                    if epochs is None:
+                        raise ValueError("Training epochs were not provided.")
+                    train_model(
+                        epochs=epochs,
+                        progress_callback=progress_callback,
+                    )
                 elif operation == "evaluate":
                     from evaulate import evaluate_model
 
@@ -495,13 +579,14 @@ class CNNDesktopApp(tk.Tk):
 
                     predict_image(str(self.selected_image))
             output.flush()
-            self.messages.put(("complete", ""))
+            self.messages.put(("complete", None))
         except Exception as error:
             output.flush()
             self.messages.put(("error", f"{type(error).__name__}: {error}"))
 
     def _poll_messages(self) -> None:
-        if self.training_dataset_future is not None and self.training_dataset_future.done():
+        if (self.training_dataset_future is not None
+           and self.training_dataset_future.done()):
             future = self.training_dataset_future
             self.training_dataset_future = None
             try:
@@ -510,7 +595,8 @@ class CNNDesktopApp(tk.Tk):
                     self.training_browser.set_dataset_source(
                         dataset,
                         len(dataset),
-                        lambda index: ("Cat" if dataset[index]["labels"] == 0 else "Dog"),
+                        lambda index: (
+                            "Cat" if dataset[index]["labels"] == 0 else "Dog"),
                     )
             except Exception as error:
                 if self.training_browser is not None:
@@ -521,13 +607,14 @@ class CNNDesktopApp(tk.Tk):
             while True:
                 kind, value = self.messages.get_nowait()
                 if kind == "output":
-                    self._handle_output(str(value))
+                    if isinstance(value, str):
+                        self._handle_output(value)
                 elif kind == "progress":
-                    current, total = value
-                    self._update_progress(current, total)
+                    if isinstance(value, tuple):
+                        self._update_progress(*value)
                 elif kind == "complete":
                     self._finish(None)
-                else:
+                elif kind == "error" and isinstance(value, str):
                     self._finish(value)
         except queue.Empty:
             pass
@@ -535,7 +622,7 @@ class CNNDesktopApp(tk.Tk):
 
     def _handle_output(self, line: str) -> None:
         self.status.configure(text=line)
-        if self.operation == "predict" and line.startswith("[WYNIK]"):
+        if self.operation == "predict" and line.startswith("[RESULT]"):
             self.prediction_result.configure(text=line)
         if self.operation == "evaluate":
             match = re.search(r"^\s*accuracy\s+([0-9]+(?:\.[0-9]+)?)", line)
@@ -544,8 +631,9 @@ class CNNDesktopApp(tk.Tk):
                 if accuracy <= 1:
                     accuracy *= 100
                 self.evaluation_accuracy = f"{accuracy:.2f}%"
-                self.status.configure(text=f"Evaluation accuracy: {self.evaluation_accuracy}")
-        if line.startswith("Błąd:"):
+                self.status.configure(
+                    text=f"Evaluation accuracy: {self.evaluation_accuracy}")
+        if line.startswith("Error:"):
             self.status.configure(text=line)
 
     def _update_progress(self, current: int, total: int) -> None:
@@ -575,13 +663,14 @@ class CNNDesktopApp(tk.Tk):
             if operation == "predict":
                 self.prediction_result.configure(text=error)
             return
-        if self.status.cget("text").startswith("Błąd:"):
+        if self.status.cget("text").startswith("Error:"):
             self.status.configure(text=f"{operation.title()} failed")
             return
         progress.configure(mode="determinate", value=progress["maximum"])
         if operation == "evaluate" and self.evaluation_accuracy is not None:
             self.status.configure(
-                text=f"Evaluate completed - accuracy: {self.evaluation_accuracy}"
+                text="Evaluate completed - accuracy:"
+                f"{self.evaluation_accuracy}"
             )
             return
         self.status.configure(text=f"{operation.title()} completed")
@@ -599,11 +688,15 @@ class CNNDesktopApp(tk.Tk):
 
     def _close(self) -> None:
         if self.operation is not None:
-            messagebox.showinfo("Operation in progress", "Wait for the current operation to finish.")
+            messagebox.showinfo("Operation in progress",
+                                "Wait for the current operation to finish.")
             return
         self._destroy_window()
 
-    def _handle_interrupt(self, _signal_number: int, _stack_frame: object) -> None:
+    def _handle_interrupt(
+        self, _signal_number: int, _stack_frame: object
+    ) -> None:
+        del _signal_number, _stack_frame
         self._destroy_window()
 
     def _destroy_window(self) -> None:
