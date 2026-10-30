@@ -14,7 +14,7 @@ class HuggingFaceCatsDogs(Dataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         image = item['image']
-        label = item['label']
+        label = item['labels']  # <--- TUTAJ: zmieniono z 'label' na 'labels'
 
         # Konwersja na RGB (niektóre zdjęcia na HF bywają czarno-białe lub CMYK)
         if image.mode != 'RGB':
@@ -28,7 +28,12 @@ class HuggingFaceCatsDogs(Dataset):
 def get_data_loaders(batch_size=32):
     print("Ładowanie zbioru microsoft/cats_vs_dogs z Hugging Face...")
     # Pobieramy oficjalny zbiór (HF domyślnie ładuje wszystko do jednego splitu 'train')
-    raw_dataset = load_dataset("microsoft/cats_vs_dogs", split="train")
+    raw_dataset = load_dataset(
+        "microsoft/cats_vs_dogs",
+        split="train",
+        cache_dir="/goinfre/krbartos"
+        # Wpisz tutaj swoją ścieżkę z dużą ilością miejsca
+    )
 
     # Definiujemy transformacje z augmentacją danych
     train_transform = transforms.Compose([
