@@ -1,6 +1,7 @@
 import io
 import queue
 import re
+import signal
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import redirect_stdout
@@ -183,11 +184,14 @@ class CNNDesktopApp(tk.Tk):
 
         self.operation_buttons: dict[str, ttk.Button] = {}
         self.progress_bars: dict[str, ttk.Progressbar] = {}
-        ttk.Label(panel, text="Training epochs:").grid(
-            row=0, column=0, sticky="e", padx=(5, 4)
+        training_options = ttk.Frame(panel)
+        training_options.grid(row=1, column=0, sticky="ew", padx=5, pady=(4, 0))
+        training_options.columnconfigure(1, weight=1)
+        ttk.Label(training_options, text="Epochs:").grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
         )
         self.epochs_spinbox = ttk.Spinbox(
-            panel,
+            training_options,
             from_=1,
             to=1000,
             textvariable=self.epochs_var,
@@ -195,11 +199,11 @@ class CNNDesktopApp(tk.Tk):
             validate="key",
             validatecommand=(self.register(self._validate_epoch_input), "%P"),
         )
-        self.epochs_spinbox.grid(row=0, column=1, sticky="w", padx=5)
+        self.epochs_spinbox.grid(row=0, column=1, sticky="ew")
         labels = (("train", "Train model"), ("evaluate", "Evaluate model"), ("predict", "Predict one image"))
         for column, (key, label) in enumerate(labels):
             button = ttk.Button(panel, text=label, command=lambda key=key: self._start(key))
-            button.grid(row=1, column=column, sticky="ew", padx=5)
+            button.grid(row=0, column=column, sticky="ew", padx=5)
             checkpoint_ready = key == "train" and MODEL_PATH.is_file()
             progress = ttk.Progressbar(
                 panel,
@@ -425,10 +429,17 @@ class CNNDesktopApp(tk.Tk):
         if self.operation is not None:
             messagebox.showinfo("Operation in progress", "Wait for the current operation to finish.")
             return
+        self._destroy_window()
+
+    def _handle_interrupt(self, _signal_number: int, _stack_frame: object) -> None:
+        self._destroy_window()
+
+    def _destroy_window(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
 
 if __name__ == "__main__":
     app = CNNDesktopApp()
+    signal.signal(signal.SIGINT, app._handle_interrupt)
     app.mainloop()
