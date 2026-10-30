@@ -1,49 +1,67 @@
 import torch
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-import os
+from torch.utils.data import Dataset, DataLoader, random_split
+from torchvision import transforms
+from datasets import load_dataset
+
+class HuggingFaceCatsDogs(Dataset):
+    def __init__(self, hf_dataset, transform=None):
+        self.dataset = hf_dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        image = item['image']
+        label = item['label']
+
+        # Konwersja na RGB (niektóre zdjęcia na HF bywają czarno-białe lub CMYK)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 def get_data_loaders(batch_size=32):
-    # Zaawansowane transformacje dla zbioru treningowego (Augmentacja w locie)
+    print("Ładowanie zbioru microsoft/cats_vs_dogs z Hugging Face...")
+    # Pobieramy oficjalny zbiór (HF domyślnie ładuje wszystko do jednego splitu 'train')
+    raw_dataset = load_dataset("microsoft/cats_vs_dogs", split="train")
+
+    # Definiujemy transformacje z augmentacją danych
     train_transform = transforms.Compose([
         transforms.Resize((64, 64)),
-        transforms.RandomRotation(20),       # Losowy obrót o +/- 20 stopni
-        transforms.RandomHorizontalFlip(),   # Odbicie lustrzane
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)), # Przesunięcia i zoom
-        transforms.ColorJitter(brightness=0.2, contrast=0.2), # Losowa zmiana jasności i kontrastu
+        transforms.RandomRotation(20),
+        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # Transformacje dla zbioru testowego (czyste dane, bez modyfikacji)
     test_transform = transforms.Compose([
         transforms.Resize((64, 64)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # Automatyczne wykrywanie ścieżki (w tym samym folderze lub poziom wyżej)
-    root_train = 'training_data' if os.path.exists('training_data') else '../training_data'
-    root_test = 'testing_data' if os.path.exists('testing_data') else '../testing_data'
+    # Podział na zbiór treningowy (80%) i testowy (20%)
+    train_size = int(0.8 * len(raw_dataset))
+    test_size = len(raw_dataset) - train_size
+    raw_train, raw_test = random_split(raw_dataset, [train_size, test_size],
+                                       generator=torch.Generator().manual_seed(42))
 
-    # Sprawdzenie czy foldery fizycznie istnieją przed załadowaniem
-    if not os.path.exists(root_train) or not os.path.exists(root_test):
-        raise FileNotFoundError(
-            f"Nie znaleziono folderów z danymi! Upewnij się, że foldery "
-            f"'training_data' oraz 'testing_data' są w odpowiednim miejscu.\n"
-            f"Szukano w: {os.path.abspath(root_train)} oraz {os.path.abspath(root_test)}"
-        )
+    # Spięcie z naszym wrapperem PyTorcha
+    train_dataset = HuggingFaceCatsDogs(raw_train, transform=train_transform)
+    test_dataset = HuggingFaceCatsDogs(raw_test, transform=test_transform)
 
-    train_dataset = datasets.ImageFolder(root=root_train, transform=train_transform)
-    test_dataset = datasets.ImageFolder(root=root_test, transform=test_transform)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
+    print(f"Załadowano! Trening: {len(train_dataset)} zdjęć, Test: {len(test_dataset)} zdjęć.")
     return train_loader, test_loader
 
 if __name__ == "__main__":
     train_loader, test_loader = get_data_loaders()
     images, labels = next(iter(train_loader))
-    print(f"Paczka obrazów ma kształt (shape): {images.shape}")
-    print("Wykryte klasy w projekcie:", train_loader.dataset.classes)
+    print(f"Kształt paczki danych: {images.shape}")
